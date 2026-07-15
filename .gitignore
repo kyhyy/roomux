@@ -1,0 +1,19 @@
+# Compiled binaries and build output
+/roomux
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Go coverage / profiling artifacts
+*.prof
+coverage.*
+
+# OS / editor cruft
+.DS_Store
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
