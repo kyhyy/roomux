@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"os"
@@ -16,5 +17,19 @@ func Connect() {
 	}
 	defer conn.Close()
 
-	fmt.Println("connected to daemon")
+	fmt.Println("connected to daemon (type something, Enter to send, Ctrl+D to quit)")
+
+	stdin := bufio.NewScanner(os.Stdin)
+	server := bufio.NewScanner(conn)
+
+	for stdin.Scan() {
+		line := stdin.Text()
+
+		fmt.Fprintln(conn, line)
+		if !server.Scan() {
+			fmt.Println("daemon closed the connection")
+			break
+		}
+		fmt.Println(server.Text())
+	}
 }

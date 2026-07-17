@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"os"
@@ -26,6 +27,12 @@ func Run() {
 			continue
 		}
 		fmt.Println("roomux: accepted connection")
+		scanner := bufio.NewScanner(conn)
+		for scanner.Scan() {
+			fmt.Println("roomux: received", scanner.Text())
+			fmt.Fprintln(conn, "echo"+scanner.Text())
+		}
+		fmt.Println("roomux: closed connection")
 		conn.Close()
 	}
 }
