@@ -17,3 +17,8 @@ coverage.*
 *.swo
 .idea/
 .vscode/
+
+# Per-developer coding-agent files — everyone drives their own tooling.
+/CLAUDE.md
+/AGENTS.md
+nimio.config.toml
