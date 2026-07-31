@@ -5,6 +5,7 @@ import (
 	"os"
 	"roomux/internal/client"
 	"roomux/internal/daemon"
+	"roomux/internal/pty"
 )
 
 func main() {
@@ -18,6 +19,8 @@ func main() {
 		client.Connect()
 	case "daemon":
 		daemon.Run()
+	case "pty":
+		pty.Pty()
 	case "help":
 		fmt.Println("usage: roomux <command> [args]")
 		fmt.Println()

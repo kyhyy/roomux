@@ -2,6 +2,8 @@ module roomux
 
 go 1.26.5
 
-require golang.org/x/term v0.45.0
-
-require golang.org/x/sys v0.47.0 // indirect
+require (
+	github.com/creack/pty v1.1.24 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/term v0.45.0 // indirect
+)
