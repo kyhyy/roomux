@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"roomux/internal/pty"
 )
 
 const socketPath = "/tmp/roomux.sock"
@@ -18,6 +19,17 @@ func Run() {
 	}
 	defer ln.Close()
 
+	ptmx, err := pty.Spawn_pty()
+
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "roomux: failed to spawn pty:", err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		_ = ptmx.Close()
+	}()
+
 	fmt.Println("running roomux daemon on", socketPath)
 	for {
 		conn, err := ln.Accept()
@@ -26,17 +38,11 @@ func Run() {
 			continue
 		}
 		fmt.Println("roomux: accepted connection")
-		buf := make([]byte, 4096)
-		for {
-			n, err := conn.Read(buf)
-			if n > 0 {
-				conn.Write(buf[:n])
-			}
-			if err != nil {
-				break
-			}
-		}
-		fmt.Println("roomux: closed connection")
-		conn.Close()
+
+		go func() {
+			pty.Attach(ptmx, conn)
+			fmt.Println("roomux: closed connection")
+			conn.Close()
+		}()
 	}
 }

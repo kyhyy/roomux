@@ -1,56 +1,28 @@
 package pty
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
-	"syscall"
 
 	"github.com/creack/pty"
-	"golang.org/x/term"
 )
 
-func Pty() {
+func Spawn_pty() (*os.File, error) {
+
 	c := exec.Command("bash")
 
 	ptmx, err := pty.Start(c)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "roomux: failed to start pty:", err)
-		os.Exit(1)
+		return nil, err
 	}
-	defer func() {
-		_ = ptmx.Close()
-	}()
+	return ptmx, nil
+}
 
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGWINCH)
+func Attach(ptmx *os.File, conn io.ReadWriter) {
+
 	go func() {
-		for range ch {
-			if err := pty.InheritSize(os.Stdin, ptmx); err != nil {
-				fmt.Fprintln(os.Stderr, "roomux: failed to resize pty:", err)
-			}
-		}
+		_, _ = io.Copy(conn, ptmx)
 	}()
-
-	ch <- syscall.SIGWINCH
-	defer func() {
-		signal.Stop(ch)
-		close(ch)
-	}()
-
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "roomux: failed to set terminal to raw mode:", err)
-		panic(err)
-	}
-	defer func() {
-		_ = term.Restore(int(os.Stdin.Fd()), oldState)
-	}()
-
-	go func() { _, _ = io.Copy(ptmx, os.Stdin) }()
-	_, _ = io.Copy(os.Stdout, ptmx)
-
+	_, _ = io.Copy(ptmx, conn)
 }
