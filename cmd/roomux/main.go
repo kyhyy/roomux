@@ -18,11 +18,10 @@ func main() {
 		client.Connect()
 	case "daemon":
 		daemon.Run()
+	case "who":
+		client.Who()
 	case "help":
-		fmt.Println("usage: roomux <command> [args]")
-		fmt.Println()
-		fmt.Println("commands:")
-		fmt.Println("  help")
+		usage()
 	default:
 		fmt.Fprintf(os.Stderr, "roomux: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -37,4 +36,5 @@ func usage() {
 	fmt.Println("  help")
 	fmt.Println("  attach")
 	fmt.Println("  daemon")
+	fmt.Println("  who")
 }

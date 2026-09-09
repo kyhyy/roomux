@@ -30,6 +30,11 @@ func Connect() {
 	}
 	defer conn.Close()
 
+	if err := proto.Write(conn, proto.Attach, nil); err != nil {
+		fmt.Fprintln(os.Stderr, "roomux: failed to attach:", err)
+		os.Exit(1)
+	}
+
 	fmt.Println("connected to daemon (Ctrl+B d to detach)")
 
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -103,4 +108,20 @@ func watchSize(conn net.Conn) {
 	for range winch {
 		sendSize(conn)
 	}
+}
+
+// Who asks the daemon which clients are attached and prints the answer.
+func Who() {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "roomux: failed to connect:", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	if err := proto.Write(conn, proto.Who, nil); err != nil {
+		fmt.Fprintln(os.Stderr, "roomux: failed to ask who:", err)
+		os.Exit(1)
+	}
+	io.Copy(os.Stdout, conn)
 }
