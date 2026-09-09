@@ -1,7 +1,6 @@
-// Package pty handles spawning a shell inside a pseudo-terminal and moving
-// bytes between that pty and the rest of roomux.
+// Package pty handles spawning a shell inside a pseudo-terminal.
 //
-// use creack/pty to start a shell, then pipe local
-// stdin/stdout through the pty master in a single process (no daemon yet).
-// Later stages hand pty ownership to the daemon.
+// Spawn_pty uses creack/pty to start a shell and returns the pty master. The
+// daemon owns that master from then on and is the only thing that reads it;
+// this package does not move bytes itself.
 package pty
