@@ -1,9 +1,8 @@
 // Package daemon implements the background server that owns sessions.
 //
-// It listens on a Unix domain socket and owns the pty for each session. A
-// single permanent goroutine reads the pty master and writes to whichever
-// client is attached, because a goroutine blocked in that read cannot be
-// interrupted without closing the pty and killing the shell. One client is
-// attached at a time; a new attach evicts the previous one. Later stages turn
-// that single slot into a set, for fan-out to simultaneous clients.
+// The daemon listens on a Unix domain socket and owns the pty of the session.
+// One permanent goroutine reads the pty and writes to the attached client,
+// because a read of the pty does not stop. The daemon reads frames from the
+// client: keystrokes go to the pty, and a size changes the pty size. Only one
+// client attaches at a time. A later stage makes the slot a set of clients.
 package daemon

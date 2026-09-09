@@ -5,15 +5,18 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
+	"roomux/internal/proto"
+	"syscall"
 
 	"golang.org/x/term"
 )
 
 const socketPath = "/tmp/roomux.sock"
 
-// Detach is Ctrl+B then d. Unprefixed bytes are forwarded untouched, so Ctrl+D
-// reaches the shell as a real EOF. Ctrl+B twice sends one literal Ctrl+B; any
-// other key after the prefix is not a command and is dropped, as in tmux.
+// Detach is Ctrl+B then d. The client sends all other keys to the shell, thus
+// the shell gets a true Ctrl+D. Ctrl+B twice sends one Ctrl+B. The client drops
+// any other key after the prefix.
 const (
 	prefixKey = 0x02 // Ctrl+B
 	detachKey = 'd'
@@ -36,12 +39,16 @@ func Connect() {
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
+	sendSize(conn)
+	go watchSize(conn)
+
 	go func() {
 		defer conn.Close()
 
 		buf := make([]byte, 4096)
 		out := make([]byte, 0, len(buf))
-		prefixed := false // survives across reads: the two keys can arrive apart
+		// prefixed stays true between reads. The two keys can come apart.
+		prefixed := false
 
 		for {
 			n, err := os.Stdin.Read(buf)
@@ -57,7 +64,6 @@ func Connect() {
 					case prefixKey:
 						out = append(out, prefixKey)
 					}
-					// Any other key after the prefix is not a command; drop it.
 					if detach {
 						break
 					}
@@ -70,7 +76,7 @@ func Connect() {
 				out = append(out, b)
 			}
 			if len(out) > 0 {
-				conn.Write(out)
+				proto.Write(conn, proto.Input, out)
 			}
 			if detach || err != nil {
 				return
@@ -79,4 +85,22 @@ func Connect() {
 	}()
 
 	io.Copy(os.Stdout, conn)
+}
+
+// sendSize tells the daemon the size of the local terminal.
+func sendSize(conn net.Conn) {
+	cols, rows, err := term.GetSize(int(os.Stdin.Fd()))
+	if err != nil {
+		return
+	}
+	proto.Write(conn, proto.Resize, proto.ResizePayload(uint16(rows), uint16(cols)))
+}
+
+// watchSize sends the new size after each SIGWINCH signal.
+func watchSize(conn net.Conn) {
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	for range winch {
+		sendSize(conn)
+	}
 }

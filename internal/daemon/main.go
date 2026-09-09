@@ -2,18 +2,19 @@ package daemon
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"os"
+	"roomux/internal/proto"
 	"roomux/internal/pty"
 	"sync"
 )
 
 const socketPath = "/tmp/roomux.sock"
 
-// The pty master has exactly one reader (broadcast), which writes to whichever
-// client is attached right now. mu guards attached; nil means nobody is
-// attached and pty output is dropped.
+// A read of the pty does not stop. Therefore one goroutine reads the pty for
+// the life of the daemon and writes to the client in this slot. mu protects
+// the slot. If the slot is nil, no client is attached and the daemon discards
+// the output.
 var (
 	mu       sync.Mutex
 	attached net.Conn
@@ -76,9 +77,8 @@ func broadcast(ptmx *os.File) {
 	}
 }
 
-// serve makes conn the attached client and forwards its input to the shell
-// until it detaches. Only one client is supported at this stage, so a new
-// attach evicts the previous one instead of silently starving it.
+// serve makes conn the attached client and reads its frames. A new client
+// replaces the previous client, because the daemon holds only one slot.
 func serve(ptmx *os.File, conn net.Conn) {
 	mu.Lock()
 	if attached != nil {
@@ -87,7 +87,30 @@ func serve(ptmx *os.File, conn net.Conn) {
 	attached = conn
 	mu.Unlock()
 
-	_, _ = io.Copy(ptmx, conn)
+	// The label is necessary. A plain break in a switch does not stop the loop.
+loop:
+	for {
+		kind, payload, err := proto.Read(conn)
+		if err != nil {
+			break
+		}
+
+		switch kind {
+		case proto.Input:
+			if _, err := ptmx.Write(payload); err != nil {
+				break loop
+			}
+		case proto.Resize:
+			rows, cols, err := proto.ParseResize(payload)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "roomux:", err)
+				continue
+			}
+			if err := pty.Setsize(ptmx, rows, cols); err != nil {
+				fmt.Fprintln(os.Stderr, "roomux: failed to set pty size:", err)
+			}
+		}
+	}
 
 	mu.Lock()
 	if attached == conn {

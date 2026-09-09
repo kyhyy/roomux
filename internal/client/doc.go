@@ -1,7 +1,6 @@
 // Package client implements the client side of roomux.
 //
-// It connects to the daemon's Unix domain socket, puts the local terminal into
-// raw mode, and streams keystrokes to the daemon while rendering the pty output
-// it sends back. Ctrl+B d detaches; every other key is forwarded untouched, so
-// the shell still sees Ctrl+C, Ctrl+D and friends.
+// The client connects to the socket of the daemon and puts the local terminal
+// into raw mode. It sends the keystrokes and the terminal size as frames, and
+// it shows the raw pty output that comes back. Ctrl+B d detaches.
 package client
