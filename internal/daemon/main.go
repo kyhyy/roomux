@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"roomux/internal/identity"
 	"roomux/internal/proto"
 	"roomux/internal/pty"
 	"sync"
@@ -52,7 +53,13 @@ func Run() {
 			fmt.Fprintln(os.Stderr, "roomux: failed to accept connection:", err)
 			continue
 		}
-		fmt.Println("roomux: accepted connection")
+		cred, err := identity.Peer(conn)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "roomux: failed to verify the client:", err)
+			conn.Close()
+			continue
+		}
+		fmt.Printf("roomux: accepted connection from uid %d pid %d\n", cred.Uid, cred.Pid)
 
 		go serve(ptmx, conn)
 	}

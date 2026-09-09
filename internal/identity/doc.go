@@ -1,7 +1,6 @@
-// Package identity verifies the real identity of each connecting client.
+// Package identity finds the real identity of a client.
 //
-// read kernel peer credentials from the Unix domain
-// socket (SO_PEERCRED via golang.org/x/sys/unix GetsockoptUcred) to establish
-// each client's real UID, rather than trusting a self-reported name. This is
-// the foundation for roomux's multi-user presence and history features.
+// The kernel records the user, the group and the process of the peer when it
+// connects to a Unix domain socket. The client cannot change these values.
+// Therefore the daemon does not have to trust a name that the client sends.
 package identity
