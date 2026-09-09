@@ -11,13 +11,17 @@ import (
 
 const socketPath = "/tmp/roomux.sock"
 
+type size struct {
+	rows uint16
+	cols uint16
+}
+
 // A read of the pty does not stop. Therefore one goroutine reads the pty for
-// the life of the daemon and writes to the client in this slot. mu protects
-// the slot. If the slot is nil, no client is attached and the daemon discards
-// the output.
+// the life of the daemon and writes to every attached client. mu protects the
+// set. An empty set means that the daemon discards the output.
 var (
-	mu       sync.Mutex
-	attached net.Conn
+	mu      sync.Mutex
+	clients = make(map[net.Conn]size)
 )
 
 func Run() {
@@ -54,19 +58,16 @@ func Run() {
 	}
 }
 
-// broadcast is the daemon's single permanent reader of the pty master. It must
-// outlive every client: a goroutine blocked in ptmx.Read cannot be interrupted
-// without closing the pty, which would kill the shell. So the reader stays put
-// and the destination changes underneath it.
+// broadcast reads the pty and writes to every attached client.
 func broadcast(ptmx *os.File) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := ptmx.Read(buf)
 		if n > 0 {
 			mu.Lock()
-			if attached != nil {
-				if _, werr := attached.Write(buf[:n]); werr != nil {
-					attached = nil
+			for conn := range clients {
+				if _, werr := conn.Write(buf[:n]); werr != nil {
+					delete(clients, conn)
 				}
 			}
 			mu.Unlock()
@@ -77,14 +78,36 @@ func broadcast(ptmx *os.File) {
 	}
 }
 
-// serve makes conn the attached client and reads its frames. A new client
-// replaces the previous client, because the daemon holds only one slot.
+// applySize gives the pty the smallest size of the attached clients. A larger
+// client then has an unused margin, but no client sees a broken screen. The
+// caller must hold mu. A client that sent no size has a zero size, thus
+// applySize ignores it.
+func applySize(ptmx *os.File) {
+	var min size
+	for _, s := range clients {
+		if s.rows == 0 || s.cols == 0 {
+			continue
+		}
+		if min.rows == 0 || s.rows < min.rows {
+			min.rows = s.rows
+		}
+		if min.cols == 0 || s.cols < min.cols {
+			min.cols = s.cols
+		}
+	}
+	if min.rows == 0 || min.cols == 0 {
+		return
+	}
+	if err := pty.Setsize(ptmx, min.rows, min.cols); err != nil {
+		fmt.Fprintln(os.Stderr, "roomux: failed to set pty size:", err)
+	}
+}
+
+// serve adds conn to the set of clients and reads its frames. Every client
+// gets the same output, thus more than one client can watch one shell.
 func serve(ptmx *os.File, conn net.Conn) {
 	mu.Lock()
-	if attached != nil {
-		attached.Close()
-	}
-	attached = conn
+	clients[conn] = size{}
 	mu.Unlock()
 
 	// The label is necessary. A plain break in a switch does not stop the loop.
@@ -106,16 +129,16 @@ loop:
 				fmt.Fprintln(os.Stderr, "roomux:", err)
 				continue
 			}
-			if err := pty.Setsize(ptmx, rows, cols); err != nil {
-				fmt.Fprintln(os.Stderr, "roomux: failed to set pty size:", err)
-			}
+			mu.Lock()
+			clients[conn] = size{rows: rows, cols: cols}
+			applySize(ptmx)
+			mu.Unlock()
 		}
 	}
 
 	mu.Lock()
-	if attached == conn {
-		attached = nil
-	}
+	delete(clients, conn)
+	applySize(ptmx)
 	mu.Unlock()
 
 	conn.Close()
