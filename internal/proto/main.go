@@ -6,14 +6,18 @@ import (
 	"io"
 )
 
-// Input and Resize can come at any time. Attach, Who and History are opening
-// frames: the first frame tells the daemon what the connection is for.
+// Attach, Who and History are opening frames: the first frame on a connection
+// tells the daemon what the connection is for. Input, Resize, NewWindow,
+// SelectWindow and CycleWindow can come at any time after an Attach frame.
 const (
-	Input   byte = 0
-	Resize  byte = 1
-	Attach  byte = 2
-	Who     byte = 3
-	History byte = 4
+	Input        byte = 0
+	Resize       byte = 1
+	Attach       byte = 2
+	Who          byte = 3
+	History      byte = 4
+	NewWindow    byte = 5
+	SelectWindow byte = 6
+	CycleWindow  byte = 7
 )
 
 // Write sends one frame: the kind, the length of the payload, then the payload.
@@ -55,4 +59,33 @@ func ParseResize(payload []byte) (rows, cols uint16, err error) {
 		return 0, 0, errors.New("proto: bad resize payload")
 	}
 	return binary.BigEndian.Uint16(payload[0:2]), binary.BigEndian.Uint16(payload[2:4]), nil
+}
+
+// IndexPayload makes the payload of a select-window frame.
+func IndexPayload(index uint16) []byte {
+	payload := make([]byte, 2)
+	binary.BigEndian.PutUint16(payload, index)
+	return payload
+}
+
+// ParseIndex gets the window index from a select-window payload.
+func ParseIndex(payload []byte) (uint16, error) {
+	if len(payload) != 2 {
+		return 0, errors.New("proto: bad index payload")
+	}
+	return binary.BigEndian.Uint16(payload), nil
+}
+
+// DeltaPayload makes the payload of a cycle-window frame. A positive delta
+// moves to a later window, and a negative delta moves to an earlier window.
+func DeltaPayload(delta int8) []byte {
+	return []byte{byte(delta)}
+}
+
+// ParseDelta gets the delta from a cycle-window payload.
+func ParseDelta(payload []byte) (int8, error) {
+	if len(payload) != 1 {
+		return 0, errors.New("proto: bad delta payload")
+	}
+	return int8(payload[0]), nil
 }

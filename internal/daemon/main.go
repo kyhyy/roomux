@@ -44,7 +44,14 @@ type client struct {
 	done chan struct{}
 }
 
-// event is one line of the history log. The kind is attach or detach.
+// A window owns one pty and the clients that view it. The index of a window is
+// its position in the windows slice.
+type window struct {
+	ptmx    *os.File
+	clients map[net.Conn]client
+}
+
+// event is one line of the history log. The kind is attach, detach or switch.
 type event struct {
 	kind string
 	uid  uint32
@@ -56,18 +63,21 @@ type event struct {
 const (
 	eventAttach = "attach"
 	eventDetach = "detach"
+	eventSwitch = "switch"
 )
 
 // historySize is the number of events that the daemon keeps. The oldest event
 // leaves when the log is full.
 const historySize = 1024
 
-// A read of the pty does not stop. Therefore one goroutine reads the pty for
-// the life of the daemon and sends each chunk to the clients. mu protects the
-// set and the history. An empty set means that the daemon discards the output.
+// A read of the pty does not stop. Therefore one goroutine reads each window
+// for the life of the daemon and sends each chunk to the clients of that
+// window. mu protects the windows, the view map, and the history. An empty
+// window discards the output.
 var (
 	mu      sync.Mutex
-	clients = make(map[net.Conn]client)
+	windows []*window
+	view    = make(map[net.Conn]*window)
 	events  []event
 )
 
@@ -81,16 +91,11 @@ func Run() {
 	}
 	defer ln.Close()
 
-	ptmx, err := pty.Spawn_pty()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "roomux: failed to spawn pty:", err)
+	mu.Lock()
+	if newWindowLocked() == nil {
 		os.Exit(1)
 	}
-	defer func() {
-		_ = ptmx.Close()
-	}()
-
-	go broadcast(ptmx)
+	mu.Unlock()
 
 	fmt.Println("running roomux daemon on", socketPath)
 	for {
@@ -107,25 +112,41 @@ func Run() {
 		}
 		fmt.Printf("roomux: accepted connection from uid %d pid %d\n", cred.Uid, cred.Pid)
 
-		go serve(ptmx, conn, cred)
+		go serve(conn, cred)
 	}
 }
 
-// ref names one client at one moment. broadcast keeps a copy of the set, thus
-// it does not hold mu while it waits for a slow client.
+// newWindowLocked spawns a pty and makes a window for it, then starts the
+// reader of that window. The caller must hold mu. It returns nil when the spawn
+// fails.
+func newWindowLocked() *window {
+	ptmx, err := pty.Spawn_pty()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "roomux: failed to spawn pty:", err)
+		return nil
+	}
+	w := &window{ptmx: ptmx, clients: make(map[net.Conn]client)}
+	windows = append(windows, w)
+	go broadcast(w)
+	return w
+}
+
+// ref names one client at one moment. broadcast keeps a copy of the clients of
+// its window, thus it does not hold mu while it waits for a slow client.
 type ref struct {
 	conn net.Conn
 	c    client
 }
 
-// broadcast reads the pty and sends every chunk to every attached client. Each
-// client has its own writer goroutine and buffer, thus a client that does not
-// read cannot stop the other clients: the daemon drops that client.
-func broadcast(ptmx *os.File) {
+// broadcast reads the pty of one window and sends every chunk to the clients
+// that view that window. Each client has its own writer goroutine and buffer,
+// thus a client that does not read cannot stop the other clients: the daemon
+// drops that client.
+func broadcast(w *window) {
 	buf := make([]byte, 4096)
 	refs := make([]ref, 0, 8)
 	for {
-		n, err := ptmx.Read(buf)
+		n, err := w.ptmx.Read(buf)
 		if n > 0 {
 			// The next read overwrites buf, thus each chunk needs a copy of
 			// its own. All the clients share the copy.
@@ -134,7 +155,7 @@ func broadcast(ptmx *os.File) {
 
 			refs = refs[:0]
 			mu.Lock()
-			for conn, c := range clients {
+			for conn, c := range w.clients {
 				refs = append(refs, ref{conn, c})
 			}
 			mu.Unlock()
@@ -191,16 +212,21 @@ func writeOut(conn net.Conn, c client) {
 	}
 }
 
-// removeLocked deletes one client and stops its writer. The delete and the
-// close of done happen in one step, thus the writer of the client stops once.
-// The caller must hold mu. It returns the client and false when the client is
-// already gone.
+// removeLocked deletes the client at conn from the window it views, stops its
+// writer, and forgets the view. The delete and the close of done happen in one
+// step, thus the writer of the client stops once. The caller must hold mu. It
+// returns the client and false when the client is already gone.
 func removeLocked(conn net.Conn) (client, bool) {
-	c, ok := clients[conn]
+	w := view[conn]
+	if w == nil {
+		return client{}, false
+	}
+	c, ok := w.clients[conn]
 	if !ok {
 		return client{}, false
 	}
-	delete(clients, conn)
+	delete(w.clients, conn)
+	delete(view, conn)
 	close(c.done)
 	return c, true
 }
@@ -228,36 +254,133 @@ func recordLocked(kind string, c client) {
 	events = append(events, event{kind: kind, uid: c.uid, pid: c.pid, at: time.Now()})
 }
 
-// applySize gives the pty the smallest size of the attached clients. A larger
-// client then has an unused margin, but no client sees a broken screen. The
-// caller must hold mu. A client that sent no size has a zero size, thus
-// applySize ignores it.
-func applySize(ptmx *os.File) {
-	var min size
-	for _, c := range clients {
+// minSize gives the smallest rows and the smallest cols across the clients of
+// one window, and zeros when no client sent a size. The caller must hold mu.
+func minSize(w *window) (rows, cols uint16) {
+	for _, c := range w.clients {
 		if c.size.rows == 0 || c.size.cols == 0 {
 			continue
 		}
-		if min.rows == 0 || c.size.rows < min.rows {
-			min.rows = c.size.rows
+		if rows == 0 || c.size.rows < rows {
+			rows = c.size.rows
 		}
-		if min.cols == 0 || c.size.cols < min.cols {
-			min.cols = c.size.cols
+		if cols == 0 || c.size.cols < cols {
+			cols = c.size.cols
 		}
 	}
-	if min.rows == 0 || min.cols == 0 {
+	return rows, cols
+}
+
+// applySizeLocked gives the pty of one window the smallest size of its clients.
+// A larger client then has an unused margin, but no client sees a broken
+// screen. The caller must hold mu.
+func applySizeLocked(w *window) {
+	rows, cols := minSize(w)
+	if rows == 0 || cols == 0 {
 		return
 	}
-	if err := pty.Setsize(ptmx, min.rows, min.cols); err != nil {
+	if err := pty.Setsize(w.ptmx, rows, cols); err != nil {
 		fmt.Fprintln(os.Stderr, "roomux: failed to set pty size:", err)
 	}
 }
 
+// redrawLocked makes the programs in one window draw again after a client
+// switches to that window. A size that does not change can leave the programs
+// quiet, thus it sets a size that differs, then the true size. The caller must
+// hold mu.
+func redrawLocked(w *window) {
+	rows, cols := minSize(w)
+	if rows == 0 || cols == 0 {
+		return
+	}
+	nudge := cols - 1
+	if nudge == 0 {
+		nudge = cols + 1
+	}
+	if err := pty.Setsize(w.ptmx, rows, nudge); err != nil {
+		fmt.Fprintln(os.Stderr, "roomux: failed to set pty size:", err)
+	}
+	if err := pty.Setsize(w.ptmx, rows, cols); err != nil {
+		fmt.Fprintln(os.Stderr, "roomux: failed to set pty size:", err)
+	}
+}
+
+// writeInput sends the keystrokes of a client to the pty of the window that the
+// client views. It returns false when the write fails.
+func writeInput(conn net.Conn, payload []byte) bool {
+	mu.Lock()
+	w := view[conn]
+	mu.Unlock()
+	if w == nil {
+		return false
+	}
+	if _, err := w.ptmx.Write(payload); err != nil {
+		return false
+	}
+	return true
+}
+
+// setSizeLocked records the size of one client and sizes its window. The caller
+// must hold mu.
+func setSizeLocked(conn net.Conn, rows, cols uint16) {
+	w := view[conn]
+	if w == nil {
+		return
+	}
+	c := w.clients[conn]
+	c.size = size{rows: rows, cols: cols}
+	w.clients[conn] = c
+	applySizeLocked(w)
+}
+
+// switchLocked moves the client at conn to w, records the switch, and draws the
+// new window again. A switch to the current window only draws again. The caller
+// must hold mu.
+func switchLocked(conn net.Conn, w *window) {
+	old := view[conn]
+	c, ok := old.clients[conn]
+	if !ok {
+		return
+	}
+	if old != w {
+		delete(old.clients, conn)
+		w.clients[conn] = c
+		view[conn] = w
+		recordLocked(eventSwitch, c)
+		applySizeLocked(old)
+	}
+	redrawLocked(w)
+}
+
+// indexOf gives the index of one window, or -1. The caller must hold mu.
+func indexOf(w *window) int {
+	for i, x := range windows {
+		if x == w {
+			return i
+		}
+	}
+	return -1
+}
+
+// cycleLocked moves the client at conn by delta windows, and wraps around. The
+// caller must hold mu.
+func cycleLocked(conn net.Conn, delta int) {
+	if len(windows) == 0 {
+		return
+	}
+	i := indexOf(view[conn])
+	if i < 0 {
+		return
+	}
+	n := len(windows)
+	switchLocked(conn, windows[((i+delta)%n+n)%n])
+}
+
 // serve reads the first frame to find the purpose of the connection. A Who
 // connection gets the list of the clients, and a History connection gets the
-// history log; each then stops. An Attach connection joins the set of clients
-// and gets the pty output.
-func serve(ptmx *os.File, conn net.Conn, cred *unix.Ucred) {
+// history log; each then stops. An Attach connection joins the first window and
+// reads frames until it stops.
+func serve(conn net.Conn, cred *unix.Ucred) {
 	defer conn.Close()
 
 	kind, _, err := proto.Read(conn)
@@ -289,8 +412,11 @@ func serve(ptmx *os.File, conn net.Conn, cred *unix.Ucred) {
 		done: make(chan struct{}),
 	}
 	mu.Lock()
-	clients[conn] = me
+	w := windows[0]
+	w.clients[conn] = me
+	view[conn] = w
 	recordLocked(eventAttach, me)
+	applySizeLocked(w)
 	mu.Unlock()
 
 	go writeOut(conn, me)
@@ -305,7 +431,7 @@ loop:
 
 		switch kind {
 		case proto.Input:
-			if _, err := ptmx.Write(payload); err != nil {
+			if !writeInput(conn, payload) {
 				break loop
 			}
 		case proto.Resize:
@@ -315,10 +441,33 @@ loop:
 				continue
 			}
 			mu.Lock()
-			c := clients[conn]
-			c.size = size{rows: rows, cols: cols}
-			clients[conn] = c
-			applySize(ptmx)
+			setSizeLocked(conn, rows, cols)
+			mu.Unlock()
+		case proto.NewWindow:
+			mu.Lock()
+			if w := newWindowLocked(); w != nil {
+				switchLocked(conn, w)
+			}
+			mu.Unlock()
+		case proto.SelectWindow:
+			i, err := proto.ParseIndex(payload)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "roomux:", err)
+				continue
+			}
+			mu.Lock()
+			if int(i) < len(windows) {
+				switchLocked(conn, windows[i])
+			}
+			mu.Unlock()
+		case proto.CycleWindow:
+			delta, err := proto.ParseDelta(payload)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "roomux:", err)
+				continue
+			}
+			mu.Lock()
+			cycleLocked(conn, int(delta))
 			mu.Unlock()
 		}
 	}
@@ -327,32 +476,38 @@ loop:
 	if c, ok := removeLocked(conn); ok {
 		recordLocked(eventDetach, c)
 	}
-	applySize(ptmx)
 	mu.Unlock()
 
 	fmt.Println("roomux: closed connection")
 }
 
-// who makes the text that lists the attached clients. It builds the text while
-// it holds mu, and thus it does not write to a socket with mu held.
+// who makes the text that lists the attached clients and their windows. It
+// builds the text while it holds mu, and thus it does not write to a socket
+// with mu held.
 func who() string {
+	type row struct {
+		win int
+		c   client
+	}
 	mu.Lock()
-	list := make([]client, 0, len(clients))
-	for _, c := range clients {
-		list = append(list, c)
+	rows := make([]row, 0, len(view))
+	for i, w := range windows {
+		for _, c := range w.clients {
+			rows = append(rows, row{win: i, c: c})
+		}
 	}
 	mu.Unlock()
 
-	sort.Slice(list, func(i, j int) bool { return list[i].pid < list[j].pid })
+	sort.Slice(rows, func(i, j int) bool { return rows[i].c.pid < rows[j].c.pid })
 
 	var text strings.Builder
-	fmt.Fprintf(&text, "%-12s %-6s %-8s %s\n", "USER", "UID", "PID", "SIZE")
-	for _, c := range list {
+	fmt.Fprintf(&text, "%-12s %-6s %-8s %-8s %s\n", "USER", "UID", "PID", "WINDOW", "SIZE")
+	for _, r := range rows {
 		box := "-"
-		if c.size.cols > 0 && c.size.rows > 0 {
-			box = fmt.Sprintf("%dx%d", c.size.cols, c.size.rows)
+		if r.c.size.cols > 0 && r.c.size.rows > 0 {
+			box = fmt.Sprintf("%dx%d", r.c.size.cols, r.c.size.rows)
 		}
-		fmt.Fprintf(&text, "%-12s %-6d %-8d %s\n", username(c.uid), c.uid, c.pid, box)
+		fmt.Fprintf(&text, "%-12s %-6d %-8d %-8d %s\n", username(r.c.uid), r.c.uid, r.c.pid, r.win, box)
 	}
 	return text.String()
 }
