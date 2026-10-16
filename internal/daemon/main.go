@@ -44,12 +44,31 @@ type client struct {
 	done chan struct{}
 }
 
+// event is one line of the history log. The kind is attach or detach.
+type event struct {
+	kind string
+	uid  uint32
+	pid  int32
+	at   time.Time
+}
+
+// An event kind in the history log.
+const (
+	eventAttach = "attach"
+	eventDetach = "detach"
+)
+
+// historySize is the number of events that the daemon keeps. The oldest event
+// leaves when the log is full.
+const historySize = 1024
+
 // A read of the pty does not stop. Therefore one goroutine reads the pty for
 // the life of the daemon and sends each chunk to the clients. mu protects the
-// set. An empty set means that the daemon discards the output.
+// set and the history. An empty set means that the daemon discards the output.
 var (
 	mu      sync.Mutex
 	clients = make(map[net.Conn]client)
+	events  []event
 )
 
 func Run() {
@@ -174,25 +193,39 @@ func writeOut(conn net.Conn, c client) {
 
 // removeLocked deletes one client and stops its writer. The delete and the
 // close of done happen in one step, thus the writer of the client stops once.
-// The caller must hold mu. It returns false when the client is already gone.
-func removeLocked(conn net.Conn) bool {
+// The caller must hold mu. It returns the client and false when the client is
+// already gone.
+func removeLocked(conn net.Conn) (client, bool) {
 	c, ok := clients[conn]
 	if !ok {
-		return false
+		return client{}, false
 	}
 	delete(clients, conn)
 	close(c.done)
-	return true
+	return c, true
 }
 
-// drop removes one client from the set and stops its writer. It returns false
-// when the client is already gone. A second call for the same conn does
-// nothing.
+// drop removes one client from the set, stops its writer, and records the
+// detach. It returns false when the client is already gone. A second call for
+// the same conn does nothing.
 func drop(conn net.Conn) bool {
 	mu.Lock()
-	ok := removeLocked(conn)
+	c, ok := removeLocked(conn)
+	if ok {
+		recordLocked(eventDetach, c)
+	}
 	mu.Unlock()
 	return ok
+}
+
+// recordLocked adds one event to the history. The oldest event leaves when the
+// log is full. The caller must hold mu.
+func recordLocked(kind string, c client) {
+	if len(events) == historySize {
+		copy(events, events[1:])
+		events = events[:len(events)-1]
+	}
+	events = append(events, event{kind: kind, uid: c.uid, pid: c.pid, at: time.Now()})
 }
 
 // applySize gives the pty the smallest size of the attached clients. A larger
@@ -221,8 +254,9 @@ func applySize(ptmx *os.File) {
 }
 
 // serve reads the first frame to find the purpose of the connection. A Who
-// connection gets the list of the clients and then stops. An Attach connection
-// joins the set of clients and gets the pty output.
+// connection gets the list of the clients, and a History connection gets the
+// history log; each then stops. An Attach connection joins the set of clients
+// and gets the pty output.
 func serve(ptmx *os.File, conn net.Conn, cred *unix.Ucred) {
 	defer conn.Close()
 
@@ -237,9 +271,14 @@ func serve(ptmx *os.File, conn net.Conn, cred *unix.Ucred) {
 			fmt.Fprintln(os.Stderr, "roomux: failed to answer who:", err)
 		}
 		return
+	case proto.History:
+		if _, err := conn.Write([]byte(history())); err != nil {
+			fmt.Fprintln(os.Stderr, "roomux: failed to answer history:", err)
+		}
+		return
 	case proto.Attach:
 	default:
-		fmt.Fprintln(os.Stderr, "roomux: the first frame is not attach or who")
+		fmt.Fprintln(os.Stderr, "roomux: the first frame is not attach, who, or history")
 		return
 	}
 
@@ -251,6 +290,7 @@ func serve(ptmx *os.File, conn net.Conn, cred *unix.Ucred) {
 	}
 	mu.Lock()
 	clients[conn] = me
+	recordLocked(eventAttach, me)
 	mu.Unlock()
 
 	go writeOut(conn, me)
@@ -284,7 +324,9 @@ loop:
 	}
 
 	mu.Lock()
-	removeLocked(conn)
+	if c, ok := removeLocked(conn); ok {
+		recordLocked(eventDetach, c)
+	}
 	applySize(ptmx)
 	mu.Unlock()
 
@@ -311,6 +353,24 @@ func who() string {
 			box = fmt.Sprintf("%dx%d", c.size.cols, c.size.rows)
 		}
 		fmt.Fprintf(&text, "%-12s %-6d %-8d %s\n", username(c.uid), c.uid, c.pid, box)
+	}
+	return text.String()
+}
+
+// history makes the text of the history log. The events are already in time
+// order. It builds the text while it holds mu, and thus it does not write to a
+// socket with mu held.
+func history() string {
+	mu.Lock()
+	list := make([]event, len(events))
+	copy(list, events)
+	mu.Unlock()
+
+	var text strings.Builder
+	fmt.Fprintf(&text, "%-19s %-7s %-12s %-6s %s\n", "TIME", "EVENT", "USER", "UID", "PID")
+	for _, e := range list {
+		fmt.Fprintf(&text, "%-19s %-7s %-12s %-6d %d\n",
+			e.at.Format("2006-01-02 15:04:05"), e.kind, username(e.uid), e.uid, e.pid)
 	}
 	return text.String()
 }

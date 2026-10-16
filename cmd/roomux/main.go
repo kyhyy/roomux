@@ -20,6 +20,8 @@ func main() {
 		daemon.Run()
 	case "who":
 		client.Who()
+	case "history":
+		client.History()
 	case "help":
 		usage()
 	default:
@@ -37,4 +39,5 @@ func usage() {
 	fmt.Println("  attach")
 	fmt.Println("  daemon")
 	fmt.Println("  who")
+	fmt.Println("  history")
 }

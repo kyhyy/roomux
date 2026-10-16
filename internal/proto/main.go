@@ -6,13 +6,14 @@ import (
 	"io"
 )
 
-// Input and Resize can come at any time. Attach and Who are opening frames:
-// the first frame tells the daemon what the connection is for.
+// Input and Resize can come at any time. Attach, Who and History are opening
+// frames: the first frame tells the daemon what the connection is for.
 const (
-	Input  byte = 0
-	Resize byte = 1
-	Attach byte = 2
-	Who    byte = 3
+	Input   byte = 0
+	Resize  byte = 1
+	Attach  byte = 2
+	Who     byte = 3
+	History byte = 4
 )
 
 // Write sends one frame: the kind, the length of the payload, then the payload.

@@ -112,6 +112,16 @@ func watchSize(conn net.Conn) {
 
 // Who asks the daemon which clients are attached and prints the answer.
 func Who() {
+	ask(proto.Who)
+}
+
+// History asks the daemon for the history log and prints it.
+func History() {
+	ask(proto.History)
+}
+
+// ask opens a short connection, sends one opening frame, and prints the reply.
+func ask(kind byte) {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "roomux: failed to connect:", err)
@@ -119,8 +129,8 @@ func Who() {
 	}
 	defer conn.Close()
 
-	if err := proto.Write(conn, proto.Who, nil); err != nil {
-		fmt.Fprintln(os.Stderr, "roomux: failed to ask who:", err)
+	if err := proto.Write(conn, kind, nil); err != nil {
+		fmt.Fprintln(os.Stderr, "roomux: failed to send the request:", err)
 		os.Exit(1)
 	}
 	io.Copy(os.Stdout, conn)

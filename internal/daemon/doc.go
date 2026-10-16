@@ -7,5 +7,7 @@
 // does not read cannot stop the other clients. The daemon waits for a client
 // that is behind, then drops the client when the wait is too long. The daemon
 // reads frames from each client: keystrokes go to the pty, and a size changes
-// the pty size. The pty gets the smallest size of the attached clients.
+// the pty size. The pty gets the smallest size of the attached clients. The
+// daemon also keeps the history of the attach and detach events, with the
+// verified uid and the time of each event.
 package daemon
