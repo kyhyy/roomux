@@ -10,12 +10,14 @@ shells via a pty.
 ## Status
 
 Working for one shared session with several windows. The daemon spawns a shell in
-a pty for each window and streams it live to the clients that view that window;
+a pty for each window and streams it live to the clients that view that window.
+Each client keeps the bottom row of its terminal for a status line: the window
+list with the current window in brackets, and how many clients share the window.
 `who` lists who is attached now and in which window, and `history` lists the
 attach, detach, and window-switch events. Identity comes from the kernel.
 
-Not built yet: more than one session, a live status line, and a history that
-survives a daemon restart.
+Not built yet: more than one session, window names, and a history that survives a
+daemon restart.
 
 ## Build and run
 

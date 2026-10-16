@@ -148,10 +148,9 @@ func broadcast(w *window) {
 	for {
 		n, err := w.ptmx.Read(buf)
 		if n > 0 {
-			// The next read overwrites buf, thus each chunk needs a copy of
-			// its own. All the clients share the copy.
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
+			// Encode copies the bytes, thus the next read cannot overwrite the
+			// frame. All the clients share the frame.
+			frame := proto.Encode(proto.Output, buf[:n])
 
 			refs = refs[:0]
 			mu.Lock()
@@ -161,7 +160,7 @@ func broadcast(w *window) {
 			mu.Unlock()
 
 			for _, r := range refs {
-				deliver(r.conn, r.c, chunk)
+				deliver(r.conn, r.c, frame)
 			}
 		}
 		if err != nil {
@@ -228,7 +227,57 @@ func removeLocked(conn net.Conn) (client, bool) {
 	delete(w.clients, conn)
 	delete(view, conn)
 	close(c.done)
+	pushStatusWindowLocked(w)
 	return c, true
+}
+
+// queueLocked offers one frame to the writer of one client. It never waits: a
+// full buffer drops the frame, because the daemon sends a fresh status line
+// after the next change. The caller must hold mu.
+func queueLocked(c client, frame []byte) {
+	select {
+	case c.out <- frame:
+	case <-c.done:
+	default:
+	}
+}
+
+// statusLocked builds the status line of one client. The windows are numbered
+// from 1 and the window of the client is in brackets. The caller must hold mu.
+func statusLocked(conn net.Conn) string {
+	w := view[conn]
+	cur := indexOf(w)
+	if cur < 0 {
+		return "roomux"
+	}
+	var list strings.Builder
+	for i := range windows {
+		if i > 0 {
+			list.WriteByte(' ')
+		}
+		if i == cur {
+			fmt.Fprintf(&list, "[%d]", i+1)
+		} else {
+			fmt.Fprintf(&list, "%d", i+1)
+		}
+	}
+	return fmt.Sprintf("roomux  %s  -  %d here", list.String(), len(w.clients))
+}
+
+// pushStatusWindowLocked sends a fresh status line to every client of one
+// window. The caller must hold mu.
+func pushStatusWindowLocked(w *window) {
+	for conn, c := range w.clients {
+		queueLocked(c, proto.Encode(proto.Status, []byte(statusLocked(conn))))
+	}
+}
+
+// pushStatusAllLocked sends a fresh status line to every client. The caller must
+// hold mu.
+func pushStatusAllLocked() {
+	for _, w := range windows {
+		pushStatusWindowLocked(w)
+	}
 }
 
 // drop removes one client from the set, stops its writer, and records the
@@ -348,6 +397,8 @@ func switchLocked(conn net.Conn, w *window) {
 		view[conn] = w
 		recordLocked(eventSwitch, c)
 		applySizeLocked(old)
+		pushStatusWindowLocked(old)
+		pushStatusWindowLocked(w)
 	}
 	redrawLocked(w)
 }
@@ -417,6 +468,7 @@ func serve(conn net.Conn, cred *unix.Ucred) {
 	view[conn] = w
 	recordLocked(eventAttach, me)
 	applySizeLocked(w)
+	pushStatusWindowLocked(w)
 	mu.Unlock()
 
 	go writeOut(conn, me)
@@ -447,6 +499,7 @@ loop:
 			mu.Lock()
 			if w := newWindowLocked(); w != nil {
 				switchLocked(conn, w)
+				pushStatusAllLocked()
 			}
 			mu.Unlock()
 		case proto.SelectWindow:
@@ -507,7 +560,7 @@ func who() string {
 		if r.c.size.cols > 0 && r.c.size.rows > 0 {
 			box = fmt.Sprintf("%dx%d", r.c.size.cols, r.c.size.rows)
 		}
-		fmt.Fprintf(&text, "%-12s %-6d %-8d %-8d %s\n", username(r.c.uid), r.c.uid, r.c.pid, r.win, box)
+		fmt.Fprintf(&text, "%-12s %-6d %-8d %-8d %s\n", username(r.c.uid), r.c.uid, r.c.pid, r.win+1, box)
 	}
 	return text.String()
 }

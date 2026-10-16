@@ -8,7 +8,9 @@ import (
 
 // Attach, Who and History are opening frames: the first frame on a connection
 // tells the daemon what the connection is for. Input, Resize, NewWindow,
-// SelectWindow and CycleWindow can come at any time after an Attach frame.
+// SelectWindow and CycleWindow can come at any time after an Attach frame. The
+// daemon sends Output and Status frames back on that same connection. A Who or a
+// History connection gets raw text and no frames.
 const (
 	Input        byte = 0
 	Resize       byte = 1
@@ -18,16 +20,23 @@ const (
 	NewWindow    byte = 5
 	SelectWindow byte = 6
 	CycleWindow  byte = 7
+	Output       byte = 8
+	Status       byte = 9
 )
 
-// Write sends one frame: the kind, the length of the payload, then the payload.
-func Write(w io.Writer, kind byte, payload []byte) error {
+// Encode makes one frame as bytes: the kind, the length of the payload, then the
+// payload.
+func Encode(kind byte, payload []byte) []byte {
 	frame := make([]byte, 3+len(payload))
 	frame[0] = kind
 	binary.BigEndian.PutUint16(frame[1:3], uint16(len(payload)))
 	copy(frame[3:], payload)
+	return frame
+}
 
-	_, err := w.Write(frame)
+// Write sends one frame.
+func Write(w io.Writer, kind byte, payload []byte) error {
+	_, err := w.Write(Encode(kind, payload))
 	return err
 }
 
