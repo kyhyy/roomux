@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -23,16 +24,28 @@ type size struct {
 	cols uint16
 }
 
+// outBuffer is the number of pty chunks that wait for one client. One chunk is
+// at most 4096 bytes, thus 32 chunks are about 128 KiB.
+const outBuffer = 32
+
+// dropAfter is how long the daemon waits for a client to accept a chunk before
+// it drops that client. A client that reads drains much faster than this. A
+// client that stopped reading fills its buffer and is gone after this time.
+const dropAfter = 2 * time.Second
+
 // The kernel gives the daemon the uid and the pid. The client cannot change
-// them.
+// them. out carries the pty output to the writer of the client. The daemon
+// closes done to stop that writer.
 type client struct {
 	uid  uint32
 	pid  int32
 	size size
+	out  chan []byte
+	done chan struct{}
 }
 
 // A read of the pty does not stop. Therefore one goroutine reads the pty for
-// the life of the daemon and writes to every attached client. mu protects the
+// the life of the daemon and sends each chunk to the clients. mu protects the
 // set. An empty set means that the daemon discards the output.
 var (
 	mu      sync.Mutex
@@ -79,24 +92,107 @@ func Run() {
 	}
 }
 
-// broadcast reads the pty and writes to every attached client.
+// ref names one client at one moment. broadcast keeps a copy of the set, thus
+// it does not hold mu while it waits for a slow client.
+type ref struct {
+	conn net.Conn
+	c    client
+}
+
+// broadcast reads the pty and sends every chunk to every attached client. Each
+// client has its own writer goroutine and buffer, thus a client that does not
+// read cannot stop the other clients: the daemon drops that client.
 func broadcast(ptmx *os.File) {
 	buf := make([]byte, 4096)
+	refs := make([]ref, 0, 8)
 	for {
 		n, err := ptmx.Read(buf)
 		if n > 0 {
+			// The next read overwrites buf, thus each chunk needs a copy of
+			// its own. All the clients share the copy.
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+
+			refs = refs[:0]
 			mu.Lock()
-			for conn := range clients {
-				if _, werr := conn.Write(buf[:n]); werr != nil {
-					delete(clients, conn)
-				}
+			for conn, c := range clients {
+				refs = append(refs, ref{conn, c})
 			}
 			mu.Unlock()
+
+			for _, r := range refs {
+				deliver(r.conn, r.c, chunk)
+			}
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+// deliver sends one chunk to one client. It waits for a client that is behind,
+// but not longer than dropAfter: the daemon drops a client that does not read.
+func deliver(conn net.Conn, c client, chunk []byte) {
+	select {
+	case c.out <- chunk:
+		return
+	case <-c.done:
+		return
+	default:
+	}
+
+	// The buffer is full. Give the writer of the client time to drain it. A
+	// client that reads drains in milliseconds.
+	timer := time.NewTimer(dropAfter)
+	defer timer.Stop()
+	select {
+	case c.out <- chunk:
+	case <-c.done:
+	case <-timer.C:
+		if drop(conn) {
+			conn.Close()
+		}
+	}
+}
+
+// writeOut writes the pty output of one client. It stops when the daemon drops
+// the client. A write error also stops it: the connection is then dead.
+func writeOut(conn net.Conn, c client) {
+	for {
+		select {
+		case chunk := <-c.out:
+			if _, err := conn.Write(chunk); err != nil {
+				drop(conn)
+				conn.Close()
+				return
+			}
+		case <-c.done:
+			return
+		}
+	}
+}
+
+// removeLocked deletes one client and stops its writer. The delete and the
+// close of done happen in one step, thus the writer of the client stops once.
+// The caller must hold mu. It returns false when the client is already gone.
+func removeLocked(conn net.Conn) bool {
+	c, ok := clients[conn]
+	if !ok {
+		return false
+	}
+	delete(clients, conn)
+	close(c.done)
+	return true
+}
+
+// drop removes one client from the set and stops its writer. It returns false
+// when the client is already gone. A second call for the same conn does
+// nothing.
+func drop(conn net.Conn) bool {
+	mu.Lock()
+	ok := removeLocked(conn)
+	mu.Unlock()
+	return ok
 }
 
 // applySize gives the pty the smallest size of the attached clients. A larger
@@ -147,9 +243,17 @@ func serve(ptmx *os.File, conn net.Conn, cred *unix.Ucred) {
 		return
 	}
 
+	me := client{
+		uid:  cred.Uid,
+		pid:  cred.Pid,
+		out:  make(chan []byte, outBuffer),
+		done: make(chan struct{}),
+	}
 	mu.Lock()
-	clients[conn] = client{uid: cred.Uid, pid: cred.Pid}
+	clients[conn] = me
 	mu.Unlock()
+
+	go writeOut(conn, me)
 
 	// The label is necessary. A plain break in a switch does not stop the loop.
 loop:
@@ -180,7 +284,7 @@ loop:
 	}
 
 	mu.Lock()
-	delete(clients, conn)
+	removeLocked(conn)
 	applySize(ptmx)
 	mu.Unlock()
 
